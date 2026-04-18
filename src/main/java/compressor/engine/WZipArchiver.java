@@ -6,7 +6,9 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -30,6 +32,17 @@ public class WZipArchiver {
     private final ResourceDispatcher dispatcher;
     private Consumer<String> logCallback;
 
+    // 压缩器类型名称到策略ID的映射
+    private static final Map<String, Byte> COMPRESSOR_NAME_TO_STRATEGY = new HashMap<>();
+    static {
+        COMPRESSOR_NAME_TO_STRATEGY.put("Brotli", ResourceDispatcher.STRATEGY_BROTLI);
+        COMPRESSOR_NAME_TO_STRATEGY.put("LZ77", ResourceDispatcher.STRATEGY_LZ77);
+        COMPRESSOR_NAME_TO_STRATEGY.put("Huffman", ResourceDispatcher.STRATEGY_LZ77); // Huffman使用LZ77策略
+        COMPRESSOR_NAME_TO_STRATEGY.put("LZWImage", ResourceDispatcher.STRATEGY_LZW_IMAGE);
+        COMPRESSOR_NAME_TO_STRATEGY.put("PoolingImage", ResourceDispatcher.STRATEGY_POOLING_IMAGE);
+        COMPRESSOR_NAME_TO_STRATEGY.put("WebDict", ResourceDispatcher.STRATEGY_WEBDICT);
+    }
+
     public WZipArchiver() {
         this.dispatcher = ResourceDispatcher.getInstance();
     }
@@ -50,12 +63,126 @@ public class WZipArchiver {
     }
 
     /**
-     * 打包：将文件列表归档为.wzip文件
+     * 打包：将网页文件夹归档为.wzip文件（使用智能选择）
+     * @param inputDir 输入文件夹路径
+     * @param outputFile 输出.wzip文件路径
+     */
+    public void archive(Path inputDir, Path outputFile) throws IOException {
+        if (!Files.isDirectory(inputDir)) {
+            throw new IOException("输入路径不是有效的目录: " + inputDir);
+        }
+
+        // 收集所有文件
+        List<FileEntry> entries = collectFiles(inputDir, inputDir);
+
+        if (entries.isEmpty()) {
+            throw new IOException("没有有效的文件可打包");
+        }
+
+        // 写入归档文件
+        try (OutputStream out = new BufferedOutputStream(
+                new FileOutputStream(outputFile.toFile()))) {
+            writeHeader(out, entries.size());
+
+            for (FileEntry entry : entries) {
+                writeEntryWithStrategy(out, entry, null, ResourceDispatcher.STRATEGY_NONE, "智能匹配");
+            }
+        }
+
+        log("归档完成: " + entries.size() + " 个文件 -> " + outputFile);
+    }
+
+    /**
+     * 获取压缩器对应的策略ID
+     */
+    private byte getStrategyIdForCompressor(ICompressor compressor) {
+        if (compressor == null) {
+            return ResourceDispatcher.STRATEGY_NONE; // 智能模式
+        }
+        String name = compressor.getAlgorithmName();
+        Byte strategyId = COMPRESSOR_NAME_TO_STRATEGY.get(name);
+        if (strategyId != null) {
+            return strategyId;
+        }
+        // 未知压缩器，默认使用LZ77
+        return ResourceDispatcher.STRATEGY_LZ77;
+    }
+
+    /**
+     * 写入单个文件条目（使用指定压缩器和策略）
+     */
+    private void writeEntryWithStrategy(OutputStream out, FileEntry entry, ICompressor compressor,
+                                        byte strategyId, String strategyName) throws IOException {
+        // 读取原始文件内容
+        byte[] originalData = Files.readAllBytes(entry.path);
+        long originalSize = originalData.length;
+
+        byte[] compressedData;
+        // 根据是否指定压缩器决定压缩方式
+        if (compressor != null) {
+            // 使用指定压缩器
+            compressedData = compressor.compress(originalData);
+        } else {
+            // 使用ResourceDispatcher智能选择
+            ResourceDispatcher.CompressionResult result = dispatcher.compress(
+                    entry.relativePath, originalData);
+            compressedData = result.compressedData;
+            strategyId = result.strategyId;
+            strategyName = result.strategyName;
+        }
+
+        // 写入相对路径（先写入长度，再写入内容）
+        byte[] pathBytes = entry.relativePath.getBytes(StandardCharsets.UTF_8);
+        out.write((pathBytes.length >> 8) & 0xFF);
+        out.write(pathBytes.length & 0xFF);
+        out.write(pathBytes);
+
+        // 写入元数据
+        writeLong(out, originalSize);
+        writeLong(out, compressedData.length);
+        out.write(strategyId);
+
+        // 写入压缩数据
+        out.write(compressedData);
+
+        double savingsPercent = originalSize > 0 ? (1.0 - (double) compressedData.length / originalSize) * 100 : 0;
+        log("  归档: " + entry.relativePath +
+                " (" + strategyName + ", " +
+                String.format("%.1f%%", savingsPercent) + ")");
+    }
+
+    /**
+     * 打包：归档单个文件为.wzip文件（使用指定压缩器）
+     * @param file 要打包的文件
+     * @param outputFile 输出.wzip文件路径
+     * @param compressor 指定使用的压缩器（为null时使用ResourceDispatcher智能选择）
+     */
+    public void archiveSingleFile(Path file, Path outputFile, ICompressor compressor) throws IOException {
+        if (!Files.exists(file) || Files.isDirectory(file)) {
+            throw new IOException("无效的文件路径: " + file);
+        }
+
+        List<Path> files = new ArrayList<>();
+        files.add(file);
+        // 使用文件名作为相对路径
+        archiveFiles(files, file.getParent(), outputFile, compressor);
+    }
+
+    /**
+     * 打包：归档单个文件为.wzip文件（使用智能选择）
+     */
+    public void archiveSingleFile(Path file, Path outputFile) throws IOException {
+        archiveSingleFile(file, outputFile, null);
+    }
+
+    /**
+     * 打包：将文件列表归档为.wzip文件（使用指定压缩器）
      * @param files 要打包的文件列表
      * @param baseDir 基础目录（用于计算相对路径）
      * @param outputFile 输出.wzip文件路径
+     * @param compressor 指定使用的压缩器（为null时使用ResourceDispatcher智能选择）
      */
-    public void archiveFiles(List<Path> files, Path baseDir, Path outputFile) throws IOException {
+    public void archiveFiles(List<Path> files, Path baseDir, Path outputFile, ICompressor compressor) throws IOException {
         if (files == null || files.isEmpty()) {
             throw new IOException("文件列表为空");
         }
@@ -80,47 +207,9 @@ public class WZipArchiver {
             throw new IOException("没有有效的文件可打包");
         }
 
-        // 写入归档文件
-        try (OutputStream out = new BufferedOutputStream(
-                new FileOutputStream(outputFile.toFile()))) {
-            writeHeader(out, entries.size());
-
-            for (FileEntry entry : entries) {
-                writeEntry(out, entry);
-            }
-        }
-
-        log("归档完成: " + entries.size() + " 个文件 -> " + outputFile);
-    }
-
-    /**
-     * 打包：归档单个文件为.wzip文件
-     * @param file 要打包的文件
-     * @param outputFile 输出.wzip文件路径
-     */
-    public void archiveSingleFile(Path file, Path outputFile) throws IOException {
-        if (!Files.exists(file) || Files.isDirectory(file)) {
-            throw new IOException("无效的文件路径: " + file);
-        }
-
-        List<Path> files = new ArrayList<>();
-        files.add(file);
-        // 使用文件名作为相对路径
-        archiveFiles(files, file.getParent(), outputFile);
-    }
-
-    /**
-     * 打包：将网页文件夹归档为.wzip文件
-     * @param inputDir 输入文件夹路径
-     * @param outputFile 输出.wzip文件路径
-     */
-    public void archive(Path inputDir, Path outputFile) throws IOException {
-        if (!Files.isDirectory(inputDir)) {
-            throw new IOException("输入路径不是有效的目录: " + inputDir);
-        }
-
-        // 收集所有文件
-        List<FileEntry> entries = collectFiles(inputDir, inputDir);
+        // 获取压缩器的策略ID
+        byte strategyId = getStrategyIdForCompressor(compressor);
+        String strategyName = compressor != null ? compressor.getAlgorithmName() : "智能匹配";
 
         // 写入归档文件
         try (OutputStream out = new BufferedOutputStream(
@@ -128,11 +217,18 @@ public class WZipArchiver {
             writeHeader(out, entries.size());
 
             for (FileEntry entry : entries) {
-                writeEntry(out, entry);
+                writeEntryWithStrategy(out, entry, compressor, strategyId, strategyName);
             }
         }
 
-        log("归档完成: " + entries.size() + " 个文件 -> " + outputFile);
+        log("归档完成: " + entries.size() + " 个文件 -> " + outputFile + " (使用" + strategyName + ")");
+    }
+
+    /**
+     * 打包：归档文件列表为.wzip文件（使用智能选择）
+     */
+    public void archiveFiles(List<Path> files, Path baseDir, Path outputFile) throws IOException {
+        archiveFiles(files, baseDir, outputFile, null);
     }
 
     /**
@@ -206,40 +302,6 @@ public class WZipArchiver {
         out.write((fileCount >> 16) & 0xFF);
         out.write((fileCount >> 8) & 0xFF);
         out.write(fileCount & 0xFF);
-    }
-
-    /**
-     * 写入单个文件条目
-     */
-    private void writeEntry(OutputStream out, FileEntry entry) throws IOException {
-        // 读取原始文件内容
-        byte[] originalData = Files.readAllBytes(entry.path);
-        long originalSize = originalData.length;
-
-        // 根据文件类型压缩
-        ResourceDispatcher.CompressionResult result = dispatcher.compress(
-                entry.relativePath, originalData);
-
-        byte[] compressedData = result.compressedData;
-        byte strategyId = result.strategyId;
-
-        // 写入相对路径（先写入长度，再写入内容）
-        byte[] pathBytes = entry.relativePath.getBytes(StandardCharsets.UTF_8);
-        out.write((pathBytes.length >> 8) & 0xFF);
-        out.write(pathBytes.length & 0xFF);
-        out.write(pathBytes);
-
-        // 写入元数据
-        writeLong(out, originalSize);
-        writeLong(out, compressedData.length);
-        out.write(strategyId);
-
-        // 写入压缩数据
-        out.write(compressedData);
-
-        log("  归档: " + entry.relativePath +
-                " (" + result.strategyName + ", " +
-                String.format("%.1f%%", result.getSavingsPercent()) + ")");
     }
 
     /**

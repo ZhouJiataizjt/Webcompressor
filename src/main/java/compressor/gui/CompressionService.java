@@ -24,6 +24,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
     private boolean smartMode = true;
     private int imageQuality = 5;
     private boolean useWZipArchive = true;
+    private ICompressor specifiedCompressor; // 用户指定的压缩器
 
     public CompressionService() {
     }
@@ -51,6 +52,28 @@ public class CompressionService extends Service<CompressionService.CompressionRe
         this.smartMode = smartMode;
         this.imageQuality = imageQuality;
         this.useWZipArchive = useWZipArchive;
+        this.specifiedCompressor = null; // 始终使用智能模式创建的压缩器
+    }
+
+    /**
+     * 配置方法：支持指定压缩器
+     * @param files 要压缩的文件列表
+     * @param compressor 用户指定的压缩器（用于归档模式）
+     * @param outputDir 输出目录
+     * @param logCallback 日志回调
+     * @param useWZipArchive 是否使用wzip归档模式
+     */
+    public void configureWithCompressor(List<Path> files, ICompressor compressor,
+                                        Path outputDir, Consumer<String> logCallback,
+                                        boolean useWZipArchive) {
+        this.selectedFiles = files;
+        this.specifiedCompressor = compressor;
+        this.outputDirectory = outputDir;
+        this.outputFileName = null;
+        this.logCallback = logCallback;
+        this.smartMode = false; // 使用指定压缩器
+        this.imageQuality = 5;
+        this.useWZipArchive = useWZipArchive;
     }
 
     @Override
@@ -62,7 +85,14 @@ public class CompressionService extends Service<CompressionService.CompressionRe
 
                 log("开始压缩任务...");
                 log("选中文件数: " + selectedFiles.size());
-                log("使用智能匹配：根据文件类型自动选择压缩算法");
+
+                if (smartMode) {
+                    log("使用智能匹配：根据文件类型自动选择压缩算法");
+                } else if (specifiedCompressor != null) {
+                    log("使用指定压缩器: " + specifiedCompressor.getAlgorithmName());
+                } else {
+                    log("使用算法: " + compressorType.getName());
+                }
                 log("=".repeat(50));
 
                 long totalOriginal = 0;
@@ -139,7 +169,24 @@ public class CompressionService extends Service<CompressionService.CompressionRe
                     baseDir = files.get(0).getParent();
                 }
 
-                archiver.archiveFiles(allFiles, baseDir, outputPath);
+                // 确定要使用的压缩器
+                ICompressor compressorToUse = null;
+                String algorithmName = "智能匹配";
+                if (!smartMode) {
+                    if (specifiedCompressor != null) {
+                        compressorToUse = specifiedCompressor;
+                        algorithmName = specifiedCompressor.getAlgorithmName();
+                    } else if (compressorType != null) {
+                        compressorToUse = createCompressorWithQuality(compressorType, "");
+                        algorithmName = compressorType.getName();
+                    }
+                }
+
+                if (compressorToUse != null) {
+                    archiver.archiveFiles(allFiles, baseDir, outputPath, compressorToUse);
+                } else {
+                    archiver.archiveFiles(allFiles, baseDir, outputPath);
+                }
 
                 // 获取压缩后大小
                 long totalCompressed = Files.size(outputPath);
@@ -153,14 +200,14 @@ public class CompressionService extends Service<CompressionService.CompressionRe
                         Files.size(file),
                         0, // 单个文件压缩后大小不单独统计
                         0,
-                        "智能匹配"
+                        algorithmName
                     ));
                 }
 
                 result.setTotalOriginalSize(totalOriginal);
                 result.setTotalCompressedSize(totalCompressed);
                 result.setTotalElapsedMillis(elapsed);
-                result.setAlgorithmName("智能匹配");
+                result.setAlgorithmName(algorithmName);
                 result.setOutputArchivePath(outputPath.toString());
 
                 TransferSimulator simulator = new TransferSimulator(TransferSimulator.BandwidthProfile.FOUR_G);
@@ -259,7 +306,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
                 result.setTotalOriginalSize(totalOriginal);
                 result.setTotalCompressedSize(totalCompressed);
                 result.setTotalElapsedMillis(elapsed);
-                result.setAlgorithmName("智能匹配");
+                result.setAlgorithmName(smartMode ? "智能匹配" : (compressorType != null ? compressorType.getName() : "未知"));
 
                 TransferSimulator simulator = new TransferSimulator(TransferSimulator.BandwidthProfile.FOUR_G);
                 TransferSimulator.TransferEstimate estimate = simulator.estimateTransfer(totalOriginal, totalCompressed);

@@ -57,12 +57,20 @@ public class CompressorFactory {
         return createCompressor(type);
     }
 
+    /**
+     * 根据文件扩展名获取推荐使用的压缩器类型
+     * 优先使用 Brotli 算法，因为它是 Google 优化的网页压缩算法
+     */
     public static CompressorType getTypeFromExtension(String extension) {
         String ext = extension.toLowerCase();
         return switch (ext) {
-            case "html", "htm", "css", "js", "json", "xml" -> CompressorType.BROTLI;
+            // 网页文本类 - 使用 Brotli（Google优化的网页压缩算法，高效）
+            case "html", "htm", "css", "js", "txt", "xml", "json", "svg", "md", "log", "csv" -> CompressorType.BROTLI;
+            // 图片类 - 使用池化压缩（有损但压缩率高）
             case "jpg", "jpeg", "png", "gif", "webp", "bmp" -> CompressorType.POOLING_IMAGE;
-            case "txt", "log", "csv", "md" -> CompressorType.BROTLI;
+            // 二进制类 - 统一使用 Brotli（通用高效）
+            case "woff", "woff2", "ttf", "eot", "otf", "ico", "bin" -> CompressorType.BROTLI;
+            // 其他文件 - 优先使用 Brotli
             default -> CompressorType.BROTLI;
         };
     }

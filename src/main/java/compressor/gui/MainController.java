@@ -280,13 +280,13 @@ public class MainController {
         CompressorFactory.CompressorType type = algorithmComboBox.getValue();
         int imageQuality = (int) imageQualitySlider.getValue();
 
-        // 【修复】当手动选择算法时，使用单文件压缩模式让算法生效
-        // WZip归档模式会忽略用户选择的算法（内部总是用ResourceDispatcher）
-        boolean useArchiveMode = smartMode;
+        // 【修复】始终使用归档模式，智能模式使用ResourceDispatcher，手动选择使用指定压缩器
+        boolean useArchiveMode = true;
 
         appendLog("=".repeat(50));
         appendLog("开始压缩任务...");
         appendLog("模式: " + (smartMode ? "智能匹配(WZip归档)" : "手动选择(" + type.getName() + ")"));
+        appendLog("输出格式: .wzip 归档包");
         appendLog("图片质量: " + imageQuality);
         if (!smartMode) {
             appendLog("算法: " + type.getName());
@@ -300,9 +300,28 @@ public class MainController {
         progressLabel.setText("准备中...");
         statusLabel.setText("压缩中...");
 
-        // 直接调用完整参数的configure方法
-        compressionService.configure(files, type, outputDirectory, null, this::appendLog, smartMode, imageQuality, useArchiveMode);
+        if (smartMode) {
+            // 智能模式：使用原始的configure方法
+            compressionService.configure(files, type, outputDirectory, null, this::appendLog, smartMode, imageQuality, useArchiveMode);
+        } else {
+            // 手动选择模式：创建指定的压缩器并使用
+            ICompressor compressor = createCompressorWithQuality(type, imageQuality);
+            compressionService.configureWithCompressor(files, compressor, outputDirectory, this::appendLog, useArchiveMode);
+        }
         compressionService.start();
+    }
+
+    /**
+     * 根据压缩器类型和质量参数创建压缩器实例
+     */
+    private ICompressor createCompressorWithQuality(CompressorFactory.CompressorType type, int imageQuality) {
+        return switch (type) {
+            case BROTLI -> new BrotliCompressor();
+            case LZ77 -> new LZ77Compressor();
+            case HUFFMAN -> new HuffmanCompressor();
+            case LZW_IMAGE -> new LZWImageCompressor();
+            case POOLING_IMAGE -> new PoolingImageCompressor(imageQuality);
+        };
     }
 
     @FXML
