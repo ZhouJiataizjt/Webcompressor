@@ -280,9 +280,13 @@ public class MainController {
         CompressorFactory.CompressorType type = algorithmComboBox.getValue();
         int imageQuality = (int) imageQualitySlider.getValue();
 
+        // 【修复】当手动选择算法时，使用单文件压缩模式让算法生效
+        // WZip归档模式会忽略用户选择的算法（内部总是用ResourceDispatcher）
+        boolean useArchiveMode = smartMode;
+
         appendLog("=".repeat(50));
         appendLog("开始压缩任务...");
-        appendLog("模式: " + (smartMode ? "智能匹配" : "手动选择"));
+        appendLog("模式: " + (smartMode ? "智能匹配(WZip归档)" : "手动选择(" + type.getName() + ")"));
         appendLog("图片质量: " + imageQuality);
         if (!smartMode) {
             appendLog("算法: " + type.getName());
@@ -296,7 +300,8 @@ public class MainController {
         progressLabel.setText("准备中...");
         statusLabel.setText("压缩中...");
 
-        compressionService.configure(files, type, outputDirectory, this::appendLog, smartMode, imageQuality);
+        // 直接调用完整参数的configure方法
+        compressionService.configure(files, type, outputDirectory, null, this::appendLog, smartMode, imageQuality, useArchiveMode);
         compressionService.start();
     }
 
@@ -360,7 +365,18 @@ public class MainController {
                 shortName = shortName.substring(0, 12) + "...";
             }
             originalSeries.getData().add(new XYChart.Data<>(shortName, fr.getOriginalSize()));
-            compressedSeries.getData().add(new XYChart.Data<>(shortName, fr.getCompressedSize()));
+
+            // 【修复】如果 compressedSize 为 0（WZip归档模式），用总压缩大小除以文件数估算
+            long compressedSize = fr.getCompressedSize();
+            if (compressedSize == 0 && lastResult.getFileResults().size() > 0) {
+                // 估算每个文件的压缩后大小（按原始大小比例分配）
+                long totalOriginal = lastResult.getTotalOriginalSize();
+                long totalCompressed = lastResult.getTotalCompressedSize();
+                if (totalOriginal > 0) {
+                    compressedSize = (long) ((double) fr.getOriginalSize() / totalOriginal * totalCompressed);
+                }
+            }
+            compressedSeries.getData().add(new XYChart.Data<>(shortName, Math.max(1, compressedSize))); // 最小值1避免图表不显示
         }
 
         compressionChart.getData().addAll(originalSeries, compressedSeries);
@@ -405,9 +421,10 @@ public class MainController {
         showAlert("网页资源压缩系统\n\n" +
                   "版本: 1.0.0\n\n" +
                   "支持算法:\n" +
-                  "- Huffman: 哈夫曼编码\n" +
+                  "- Brotli: Google优化的网页压缩（默认）\n" +
                   "- LZ77: 滑动窗口字典压缩\n" +
-                  "- WebDict: 网页专用混合压缩");
+                  "- Huffman: 哈夫曼编码\n" +
+                  "- PoolingImage: 图像池化压缩");
     }
 
     @FXML
@@ -469,7 +486,11 @@ public class MainController {
     private void handleDecompress(ActionEvent event) {
         FileChooser chooser = new FileChooser();
         chooser.setTitle("选择要解压的文件");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("压缩文件", "*.compressed", "*.huff", "*.zip"));
+        chooser.getExtensionFilters().addAll(
+            new FileChooser.ExtensionFilter("WZip压缩包", "*.wzip"),
+            new FileChooser.ExtensionFilter("压缩文件", "*.compressed", "*.huff"),
+            new FileChooser.ExtensionFilter("所有文件", "*.*")
+        );
         File inputFile = chooser.showOpenDialog(null);
 
         if (inputFile == null) {
@@ -488,52 +509,65 @@ public class MainController {
             try {
                 Path inputPath = inputFile.toPath();
                 Path outputPath = outputDir.toPath();
+                String fileName = inputFile.getName();
 
                 appendLog("=".repeat(50));
                 appendLog("开始解压...");
-                appendLog("文件: " + inputFile.getName());
+                appendLog("文件: " + fileName);
                 appendLog("输出: " + outputDir.getAbsolutePath());
                 appendLog("=".repeat(50));
 
-                byte[] compressed = Files.readAllBytes(inputPath);
-                String fileName = inputFile.getName();
-
-                // 根据文件后缀智能选择解压算法
                 String extension = FileUtils.getFileExtension(fileName);
-                CompressorFactory.CompressorType type = CompressorFactory.getTypeFromExtension(extension);
 
-                // 尝试多种解压器
-                ICompressor decompressor = null;
-                try {
-                    switch (type) {
-                        case POOLING_IMAGE, LZW_IMAGE -> {
-                            LZWImageCompressor lzw = new LZWImageCompressor();
-                            decompressor = lzw;
+                // 检查是否是 WZip 归档文件
+                if (extension.equalsIgnoreCase("wzip")) {
+                    // 使用 WZipArchiver 解压归档文件
+                    WZipArchiver archiver = new WZipArchiver();
+                    archiver.setLogCallback(this::appendLog);
+                    archiver.extract(inputPath, outputPath);
+
+                    Platform.runLater(() -> {
+                        appendLog("解压完成！");
+                        appendLog("文件已解压至: " + outputDir.getAbsolutePath());
+                    });
+                } else {
+                    // 使用传统方式解压单文件
+                    byte[] compressed = Files.readAllBytes(inputPath);
+
+                    CompressorFactory.CompressorType type = CompressorFactory.getTypeFromExtension(extension);
+
+                    ICompressor decompressor = null;
+                    try {
+                        switch (type) {
+                            case POOLING_IMAGE, LZW_IMAGE -> {
+                                LZWImageCompressor lzw = new LZWImageCompressor();
+                                decompressor = lzw;
+                            }
+                            case BROTLI -> {
+                                BrotliCompressor brotli = new BrotliCompressor();
+                                decompressor = brotli;
+                            }
+                            default -> {
+                                LZ77Compressor lz77 = new LZ77Compressor();
+                                decompressor = lz77;
+                            }
                         }
-                        case WEB_DICT -> {
-                            // WebDict 解压较慢，跳过
-                            throw new Exception("跳过WebDict");
-                        }
-                        default -> {
-                            LZ77Compressor lz77 = new LZ77Compressor();
-                            decompressor = lz77;
-                        }
+                    } catch (Exception e) {
+                        decompressor = new LZ77Compressor();
                     }
-                } catch (Exception e) {
-                    decompressor = new LZ77Compressor();
+
+                    byte[] decompressed = decompressor.decompress(compressed);
+                    String outputFileName = fileName.replace(".compressed", "").replace(".huff", "");
+                    Path outFile = outputPath.resolve(outputFileName);
+                    Files.write(outFile, decompressed);
+
+                    final long size = decompressed.length;
+                    Platform.runLater(() -> {
+                        appendLog("解压完成！");
+                        appendLog("输出文件: " + outFile);
+                        appendLog("大小: " + FileUtils.formatFileSize(size));
+                    });
                 }
-
-                byte[] decompressed = decompressor.decompress(compressed);
-                String outputFileName = fileName.replace(".compressed", "").replace(".huff", "");
-                Path outFile = outputPath.resolve(outputFileName);
-                Files.write(outFile, decompressed);
-
-                final long size = decompressed.length;
-                Platform.runLater(() -> {
-                    appendLog("解压完成！");
-                    appendLog("输出文件: " + outFile);
-                    appendLog("大小: " + FileUtils.formatFileSize(size));
-                });
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     appendLog("解压失败: " + e.getMessage());

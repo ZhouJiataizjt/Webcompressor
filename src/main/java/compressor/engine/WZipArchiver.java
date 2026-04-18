@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * 网页归档打包器 (.wzip格式)
@@ -27,6 +28,7 @@ public class WZipArchiver {
     private static final byte VERSION = 1;
 
     private final ResourceDispatcher dispatcher;
+    private Consumer<String> logCallback;
 
     public WZipArchiver() {
         this.dispatcher = ResourceDispatcher.getInstance();
@@ -34,6 +36,77 @@ public class WZipArchiver {
 
     public WZipArchiver(ResourceDispatcher dispatcher) {
         this.dispatcher = dispatcher;
+    }
+
+    public void setLogCallback(Consumer<String> callback) {
+        this.logCallback = callback;
+    }
+
+    private void log(String message) {
+        if (logCallback != null) {
+            logCallback.accept(message);
+        }
+        System.out.println(message);
+    }
+
+    /**
+     * 打包：将文件列表归档为.wzip文件
+     * @param files 要打包的文件列表
+     * @param baseDir 基础目录（用于计算相对路径）
+     * @param outputFile 输出.wzip文件路径
+     */
+    public void archiveFiles(List<Path> files, Path baseDir, Path outputFile) throws IOException {
+        if (files == null || files.isEmpty()) {
+            throw new IOException("文件列表为空");
+        }
+
+        // 收集所有文件条目
+        List<FileEntry> entries = new ArrayList<>();
+        for (Path file : files) {
+            if (!Files.exists(file)) {
+                log("跳过不存在的文件: " + file);
+                continue;
+            }
+            if (Files.isDirectory(file)) {
+                // 如果是目录，递归收集
+                entries.addAll(collectFiles(file, baseDir));
+            } else {
+                String relativePath = baseDir.relativize(file).toString().replace("\\", "/");
+                entries.add(new FileEntry(file, relativePath));
+            }
+        }
+
+        if (entries.isEmpty()) {
+            throw new IOException("没有有效的文件可打包");
+        }
+
+        // 写入归档文件
+        try (OutputStream out = new BufferedOutputStream(
+                new FileOutputStream(outputFile.toFile()))) {
+            writeHeader(out, entries.size());
+
+            for (FileEntry entry : entries) {
+                writeEntry(out, entry);
+            }
+        }
+
+        log("归档完成: " + entries.size() + " 个文件 -> " + outputFile);
+    }
+
+    /**
+     * 打包：归档单个文件为.wzip文件
+     * @param file 要打包的文件
+     * @param outputFile 输出.wzip文件路径
+     */
+    public void archiveSingleFile(Path file, Path outputFile) throws IOException {
+        if (!Files.exists(file) || Files.isDirectory(file)) {
+            throw new IOException("无效的文件路径: " + file);
+        }
+
+        List<Path> files = new ArrayList<>();
+        files.add(file);
+        // 使用文件名作为相对路径
+        archiveFiles(files, file.getParent(), outputFile);
     }
 
     /**
@@ -55,11 +128,11 @@ public class WZipArchiver {
             writeHeader(out, entries.size());
 
             for (FileEntry entry : entries) {
-                writeEntry(out, entry, inputDir);
+                writeEntry(out, entry);
             }
         }
 
-        System.out.println("归档完成: " + entries.size() + " 个文件 -> " + outputFile);
+        log("归档完成: " + entries.size() + " 个文件 -> " + outputFile);
     }
 
     /**
@@ -138,7 +211,7 @@ public class WZipArchiver {
     /**
      * 写入单个文件条目
      */
-    private void writeEntry(OutputStream out, FileEntry entry, Path baseDir) throws IOException {
+    private void writeEntry(OutputStream out, FileEntry entry) throws IOException {
         // 读取原始文件内容
         byte[] originalData = Files.readAllBytes(entry.path);
         long originalSize = originalData.length;
@@ -164,7 +237,7 @@ public class WZipArchiver {
         // 写入压缩数据
         out.write(compressedData);
 
-        System.out.println("  归档: " + entry.relativePath +
+        log("  归档: " + entry.relativePath +
                 " (" + result.strategyName + ", " +
                 String.format("%.1f%%", result.getSavingsPercent()) + ")");
     }

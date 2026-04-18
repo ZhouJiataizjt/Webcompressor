@@ -1,13 +1,11 @@
 package compressor.gui;
 
 import compressor.algorithms.HuffmanCompressor;
-import compressor.algorithms.TrieDictionary;
+import compressor.algorithms.WebDictionary;
 import compressor.algorithms.WebDictCompressor;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
 import javafx.scene.control.TextArea;
-import javafx.scene.layout.Priority;
-import javafx.scene.layout.VBox;
 import java.util.Map;
 
 public class TreeVisualizer {
@@ -17,31 +15,13 @@ public class TreeVisualizer {
         return createTreeViewFromText(treeStructure);
     }
 
-    public static TreeView<String> createTrieTreeView(TrieDictionary trie, int maxDepth) {
-        String treeStructure = trie.visualizeTree(maxDepth);
-        return createTreeViewFromText(treeStructure);
-    }
-
-    public static void displayTreeInTextArea(TextArea textArea, HuffmanCompressor compressor) {
-        textArea.setText(compressor.getTreeStructure());
-    }
-
-    public static void displayTrieInTextArea(TextArea textArea, TrieDictionary trie, int maxDepth) {
-        textArea.setText(trie.visualizeTree(maxDepth));
-    }
-
     public static void displayWebDictInfo(TextArea textArea, WebDictCompressor compressor) {
         StringBuilder sb = new StringBuilder();
         sb.append("=".repeat(50)).append("\n");
-        sb.append("WebDict 压缩流水线信息\n");
+        sb.append("WebDict 压缩信息\n");
         sb.append("=".repeat(50)).append("\n\n");
-
-        sb.append(compressor.getCompressionPipelineInfo()).append("\n\n");
-
-        sb.append("-".repeat(50)).append("\n");
-        sb.append("Trie 树结构 (前4层):\n");
-        sb.append("-".repeat(50)).append("\n");
-        sb.append(compressor.getTrieTreeVisualization());
+        sb.append(compressor.getCompressionInfo()).append("\n\n");
+        sb.append("字典大小: ").append(WebDictionary.size()).append(" 个词条\n");
 
         textArea.setText(sb.toString());
     }
@@ -92,7 +72,6 @@ public class TreeVisualizer {
 
     private static TreeItem<String> findParent(TreeItem<String> root, int targetLevel) {
         if (targetLevel <= 0) return null;
-
         return findParentRecursive(root, targetLevel, 0);
     }
 
@@ -100,23 +79,20 @@ public class TreeVisualizer {
         if (currentLevel >= targetLevel - 1) {
             return current;
         }
-
         if (current.getChildren().isEmpty()) {
             return current;
         }
-
-        return findParentRecursive(current.getChildren().get(current.getChildren().size() - 1),
-                                 targetLevel, currentLevel + 1);
+        return findParentRecursive(
+            current.getChildren().get(current.getChildren().size() - 1),
+            targetLevel, currentLevel + 1);
     }
 
     public static String generateCodeTableText(HuffmanCompressor compressor) {
         Map<Integer, String> codeTable = compressor.getCodeTable();
-
         StringBuilder sb = new StringBuilder();
         sb.append("=".repeat(50)).append("\n");
         sb.append("Huffman 编码表\n");
         sb.append("=".repeat(50)).append("\n\n");
-
         sb.append(String.format("%-15s %-20s %s\n", "字符", "编码", "长度"));
         sb.append("-".repeat(50)).append("\n");
 
@@ -125,14 +101,12 @@ public class TreeVisualizer {
             .forEach(entry -> {
                 int byteValue = entry.getKey();
                 String code = entry.getValue();
-
                 String charStr;
                 if (byteValue >= 32 && byteValue < 127) {
                     charStr = String.format("'%c'", (char) byteValue);
                 } else {
                     charStr = String.format("0x%02X", byteValue);
                 }
-
                 sb.append(String.format("%-15s %-20s %d\n", charStr, code, code.length()));
             });
 
@@ -144,7 +118,6 @@ public class TreeVisualizer {
         sb.append("=".repeat(50)).append("\n");
         sb.append("Huffman 压缩统计\n");
         sb.append("=".repeat(50)).append("\n\n");
-
         sb.append("原始大小: ").append(originalSize).append(" bytes\n");
         sb.append("压缩后: ").append(compressedSize).append(" bytes\n");
         if (originalSize > 0) {
@@ -153,16 +126,13 @@ public class TreeVisualizer {
             sb.append("压缩率: ").append(String.format("%.2f%%", compressionRatio)).append("\n");
             sb.append("节省空间: ").append(String.format("%.2f%%", ratio)).append("\n");
         }
-
         sb.append("\n编码表统计:\n");
         sb.append("- 唯一字符数: ").append(compressor.getCodeTable().size()).append("\n");
 
         int maxLength = compressor.getCodeTable().values().stream()
-            .mapToInt(String::length)
-            .max().orElse(0);
+            .mapToInt(String::length).max().orElse(0);
         int minLength = compressor.getCodeTable().values().stream()
-            .mapToInt(String::length)
-            .min().orElse(0);
+            .mapToInt(String::length).min().orElse(0);
 
         sb.append("- 最短编码: ").append(minLength).append(" bits\n");
         sb.append("- 最长编码: ").append(maxLength).append(" bits\n");

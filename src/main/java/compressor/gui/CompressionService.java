@@ -2,6 +2,7 @@ package compressor.gui;
 
 import compressor.algorithms.*;
 import compressor.core.ICompressor;
+import compressor.engine.WZipArchiver;
 import compressor.model.CompressionStats;
 import compressor.utils.FileUtils;
 import compressor.utils.TransferSimulator;
@@ -9,6 +10,7 @@ import javafx.concurrent.Service;
 import javafx.concurrent.Task;
 import java.io.IOException;
 import java.nio.file.*;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -17,27 +19,38 @@ public class CompressionService extends Service<CompressionService.CompressionRe
     private List<Path> selectedFiles;
     private CompressorFactory.CompressorType compressorType;
     private Path outputDirectory;
+    private String outputFileName;
     private Consumer<String> logCallback;
     private boolean smartMode = true;
     private int imageQuality = 5;
+    private boolean useWZipArchive = true;
 
     public CompressionService() {
     }
 
     public void configure(List<Path> files, CompressorFactory.CompressorType type,
                          Path outputDir, Consumer<String> logCallback) {
-        this.configure(files, type, outputDir, logCallback, true, 5);
+        this.configure(files, type, outputDir, null, logCallback, true, 5, true);
     }
 
     public void configure(List<Path> files, CompressorFactory.CompressorType type,
                          Path outputDir, Consumer<String> logCallback,
                          boolean smartMode, int imageQuality) {
+        // 默认使用归档模式
+        this.configure(files, type, outputDir, null, logCallback, smartMode, imageQuality, true);
+    }
+
+    public void configure(List<Path> files, CompressorFactory.CompressorType type,
+                         Path outputDir, String outputFileName, Consumer<String> logCallback,
+                         boolean smartMode, int imageQuality, boolean useWZipArchive) {
         this.selectedFiles = files;
         this.compressorType = type;
         this.outputDirectory = outputDir;
+        this.outputFileName = outputFileName;
         this.logCallback = logCallback;
         this.smartMode = smartMode;
         this.imageQuality = imageQuality;
+        this.useWZipArchive = useWZipArchive;
     }
 
     @Override
@@ -53,28 +66,145 @@ public class CompressionService extends Service<CompressionService.CompressionRe
                 log("=".repeat(50));
 
                 long totalOriginal = 0;
-                long totalCompressed = 0;
                 long startTime = System.currentTimeMillis();
 
-                for (int i = 0; i < selectedFiles.size(); i++) {
-                    Path file = selectedFiles.get(i);
-                    updateProgress(i, selectedFiles.size());
+                if (useWZipArchive) {
+                    // 使用 WZip 归档模式：生成单个压缩包
+                    result = compressToArchive(selectedFiles, startTime);
+                } else {
+                    // 原有模式：每个文件单独压缩（保留兼容性）
+                    result = compressIndividualFiles(selectedFiles, startTime);
+                }
 
-                    if (!Files.exists(file)) {
-                        log("跳过不存在的文件: " + file.getFileName());
+                return result;
+            }
+
+            private CompressionResult compressToArchive(List<Path> files, long startTime) throws Exception {
+                CompressionResult result = new CompressionResult();
+
+                // 收集所有文件（包括目录内的文件）
+                List<Path> allFiles = new ArrayList<>();
+                for (Path file : files) {
+                    if (Files.isDirectory(file)) {
+                        try (java.nio.file.DirectoryStream<Path> stream =
+                             Files.newDirectoryStream(file)) {
+                            for (Path p : stream) {
+                                if (Files.isRegularFile(p)) {
+                                    allFiles.add(p);
+                                }
+                            }
+                        }
+                    } else if (Files.isRegularFile(file)) {
+                        allFiles.add(file);
+                    }
+                }
+
+                if (allFiles.isEmpty()) {
+                    log("没有可压缩的文件");
+                    return result;
+                }
+
+                // 计算原始总大小
+                long totalOriginal = 0;
+                for (Path file : allFiles) {
+                    totalOriginal += Files.size(file);
+                }
+
+                // 生成输出文件名
+                String archiveFileName;
+                if (outputFileName != null && !outputFileName.isEmpty()) {
+                    archiveFileName = outputFileName;
+                } else if (files.size() == 1 && Files.isDirectory(files.get(0))) {
+                    archiveFileName = files.get(0).getFileName() + ".wzip";
+                } else if (files.size() == 1 && Files.isRegularFile(files.get(0))) {
+                    String baseName = files.get(0).getFileName().toString();
+                    int dotIdx = baseName.lastIndexOf('.');
+                    archiveFileName = (dotIdx > 0 ? baseName.substring(0, dotIdx) : baseName) + ".wzip";
+                } else {
+                    archiveFileName = "archive_" + System.currentTimeMillis() + ".wzip";
+                }
+
+                Path outputPath = outputDirectory.resolve(archiveFileName);
+
+                // 使用 WZipArchiver 打包
+                WZipArchiver archiver = new WZipArchiver();
+                archiver.setLogCallback(logCallback);
+
+                // 确定基础目录
+                Path baseDir;
+                if (files.size() == 1 && Files.isDirectory(files.get(0))) {
+                    baseDir = files.get(0);
+                } else {
+                    // 多个文件时，使用第一个文件的父目录
+                    baseDir = files.get(0).getParent();
+                }
+
+                archiver.archiveFiles(allFiles, baseDir, outputPath);
+
+                // 获取压缩后大小
+                long totalCompressed = Files.size(outputPath);
+                long elapsed = System.currentTimeMillis() - startTime;
+
+                // 添加文件结果
+                for (Path file : allFiles) {
+                    String relativePath = baseDir.relativize(file).toString();
+                    result.addFileResult(new CompressionResult.FileResult(
+                        relativePath,
+                        Files.size(file),
+                        0, // 单个文件压缩后大小不单独统计
+                        0,
+                        "智能匹配"
+                    ));
+                }
+
+                result.setTotalOriginalSize(totalOriginal);
+                result.setTotalCompressedSize(totalCompressed);
+                result.setTotalElapsedMillis(elapsed);
+                result.setAlgorithmName("智能匹配");
+                result.setOutputArchivePath(outputPath.toString());
+
+                TransferSimulator simulator = new TransferSimulator(TransferSimulator.BandwidthProfile.FOUR_G);
+                TransferSimulator.TransferEstimate estimate = simulator.estimateTransfer(totalOriginal, totalCompressed);
+                result.setTransferEstimate(estimate);
+
+                log("");
+                log("=".repeat(50));
+                log("压缩完成!");
+                log("总耗时: " + elapsed + "ms");
+                log("原始大小: " + formatSize(totalOriginal));
+                log("压缩后: " + formatSize(totalCompressed));
+                if (totalOriginal > 0) {
+                    double ratio = (1.0 - (double) totalCompressed / totalOriginal) * 100;
+                    log("总压缩率: " + String.format("%.2f%%", ratio));
+                }
+                log("输出文件: " + outputPath);
+                log("=".repeat(50));
+
+                return result;
+            }
+
+            private CompressionResult compressIndividualFiles(List<Path> files, long startTime) throws Exception {
+                CompressionResult result = new CompressionResult();
+
+                long totalOriginal = 0;
+                long totalCompressed = 0;
+
+                for (int i = 0; i < files.size(); i++) {
+                    Path file = files.get(i);
+                    updateProgress(i, files.size());
+
+                    if (!Files.exists(file) || Files.isDirectory(file)) {
+                        log("跳过: " + file.getFileName());
                         continue;
                     }
 
                     try {
-                        // 根据模式选择压缩器
                         String extension = FileUtils.getFileExtension(file.getFileName().toString());
                         CompressorFactory.CompressorType useType;
 
                         if (smartMode) {
-                            // 智能模式：根据文件类型自动选择
                             useType = CompressorFactory.getTypeFromExtension(extension);
                         } else {
-                            // 手动模式：使用用户选择的算法
                             useType = compressorType;
                         }
 
@@ -96,7 +226,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
                         double savingsPercent = (1.0 - (double) compressedSize / fileSize) * 100;
 
                         log(String.format("[%d/%d] %s (%s) -> %s (节省 %.1f%%)",
-                            i + 1, selectedFiles.size(),
+                            i + 1, files.size(),
                             file.getFileName(),
                             useType.getName(),
                             formatSize(compressedSize),
@@ -116,8 +246,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
                         }
 
                         if (compressor instanceof WebDictCompressor webDict) {
-                            result.setTrieTree(webDict.getTrieTreeVisualization());
-                            result.setPipelineInfo(webDict.getCompressionPipelineInfo());
+                            result.setPipelineInfo(webDict.getCompressionInfo());
                         }
 
                     } catch (Exception e) {
@@ -181,6 +310,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
         private String huffmanTree;
         private String trieTree;
         private String pipelineInfo;
+        private String outputArchivePath;
         private java.util.Map<Integer, String> codeTable;
         private TransferSimulator.TransferEstimate transferEstimate;
         private final java.util.List<FileResult> fileResults = new java.util.ArrayList<>();
@@ -235,6 +365,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
         public void setPipelineInfo(String info) { this.pipelineInfo = info; }
         public void setCodeTable(java.util.Map<Integer, String> table) { this.codeTable = table; }
         public void setTransferEstimate(TransferSimulator.TransferEstimate estimate) { this.transferEstimate = estimate; }
+        public void setOutputArchivePath(String path) { this.outputArchivePath = path; }
 
         public long getTotalOriginalSize() { return totalOriginalSize; }
         public long getTotalCompressedSize() { return totalCompressedSize; }
@@ -243,6 +374,7 @@ public class CompressionService extends Service<CompressionService.CompressionRe
         public String getHuffmanTree() { return huffmanTree; }
         public String getTrieTree() { return trieTree; }
         public String getPipelineInfo() { return pipelineInfo; }
+        public String getOutputArchivePath() { return outputArchivePath; }
         public java.util.Map<Integer, String> getCodeTable() { return codeTable; }
         public TransferSimulator.TransferEstimate getTransferEstimate() { return transferEstimate; }
         public List<FileResult> getFileResults() { return fileResults; }

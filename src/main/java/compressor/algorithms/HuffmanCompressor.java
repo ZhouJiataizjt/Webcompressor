@@ -40,20 +40,13 @@ public class HuffmanCompressor extends AbstractCompressor {
         }
 
         startTiming();
-        long startTime = System.currentTimeMillis();
-
-        // 步骤1: 频率统计
         long[] frequencies = countFrequencies(data);
-
-        // 步骤2: 构建Huffman树
         HuffmanNode root = buildHuffmanTree(frequencies);
 
-        // 步骤3: 生成编码表
         codeTable.clear();
         reverseCodeTable.clear();
         generateCodeTable(root, new StringBuilder());
 
-        // 步骤4: 编码数据
         BitOutputStream bitOut = new BitOutputStream();
         for (byte b : data) {
             String code = codeTable.get((int) b & 0xff);
@@ -63,15 +56,12 @@ public class HuffmanCompressor extends AbstractCompressor {
         }
 
         byte[] encodedData = bitOut.toByteArray();
-        int paddingBits = (8 - (data.length % 8)) % 8;
 
-        // 步骤5: 组装输出格式
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(MAGIC[0]);
         out.write(MAGIC[1]);
         out.write(MAGIC[2]);
         out.write(MAGIC[3]);
-        out.write(paddingBits);
         out.write(frequencies.length & 0xff);
         for (long freq : frequencies) {
             writeLong(out, freq);
@@ -85,14 +75,13 @@ public class HuffmanCompressor extends AbstractCompressor {
 
     @Override
     public byte[] decompress(byte[] data) throws IOException {
-        if (data == null || data.length < 4 + 1 + 1 + 256 * 8) {
+        if (data == null || data.length < 4 + 1 + 256 * 8) {
             return new byte[0];
         }
 
         startTiming();
         ByteArrayInputStream in = new ByteArrayInputStream(data);
 
-        // 验证魔数
         byte[] magic = new byte[4];
         in.read(magic);
         if (magic[0] != MAGIC[0] || magic[1] != MAGIC[1] ||
@@ -100,51 +89,40 @@ public class HuffmanCompressor extends AbstractCompressor {
             throw new IOException("无效的Huffman压缩文件格式");
         }
 
-        int paddingBits = in.read();
-        in.read(); // 跳过长度字节(我们用固定256)
+        int freqLen = in.read();
 
-        // 读取频率表
         long[] frequencies = new long[256];
-        for (int i = 0; i < 256; i++) {
+        for (int i = 0; i < freqLen; i++) {
             frequencies[i] = readLong(in);
         }
 
-        // 重建Huffman树
         HuffmanNode root = buildHuffmanTree(frequencies);
 
-        // 计算原始数据大小
         long originalSize = 0;
         for (long freq : frequencies) {
             originalSize += freq;
         }
 
-        // 读取编码数据
-        byte[] encodedData = new byte[data.length - (4 + 1 + 1 + 256 * 8)];
+        byte[] encodedData = new byte[data.length - (4 + 1 + freqLen * 8)];
         in.read(encodedData);
 
-        // 解码
         BitInputStream bitIn = new BitInputStream(encodedData);
         ByteArrayOutputStream result = new ByteArrayOutputStream((int) Math.min(originalSize, Integer.MAX_VALUE));
 
-        int bitsToRead = (int)(originalSize * 8 - paddingBits);
+        int charsToRead = (int) originalSize;
+        int charsRead = 0;
         HuffmanNode current = root;
-        int bitsRead = 0;
 
-        while (bitsRead < bitsToRead && current != null) {
+        while (charsRead < charsToRead && current != null) {
             if (current.isLeaf()) {
                 result.write(current.getByteValue());
+                charsRead++;
                 current = root;
             } else {
                 int bit = bitIn.readBit();
                 if (bit == -1) break;
                 current = (bit == 0) ? current.getLeft() : current.getRight();
-                bitsRead++;
             }
-        }
-
-        // 处理最后一个字符（如果还没到叶节点）
-        if (current != null && current.isLeaf()) {
-            result.write(current.getByteValue());
         }
 
         byte[] resultData = result.toByteArray();
@@ -163,14 +141,24 @@ public class HuffmanCompressor extends AbstractCompressor {
     private HuffmanNode buildHuffmanTree(long[] frequencies) {
         PriorityQueue<HuffmanNode> pq = new PriorityQueue<>();
 
-        for (int i = 0; i < 256; i++) {
+        int count = 0;
+        for (int i = 0; i < frequencies.length; i++) {
             if (frequencies[i] > 0) {
                 pq.offer(HuffmanNode.createLeaf(i, frequencies[i]));
+                count++;
             }
         }
 
-        if (pq.size() == 0) {
+        if (count == 0) {
             return HuffmanNode.createLeaf(0, 0);
+        }
+
+        if (count == 1) {
+            HuffmanNode single = pq.poll();
+            return HuffmanNode.createInternal(
+                HuffmanNode.createLeaf(single.getByteValue(), single.getFrequency()),
+                HuffmanNode.createLeaf(0, 0)
+            );
         }
 
         while (pq.size() > 1) {
@@ -186,7 +174,7 @@ public class HuffmanCompressor extends AbstractCompressor {
         if (node == null) return;
 
         if (node.isLeaf()) {
-            String code = prefix.length() > 0 ? prefix.toString() : "0";
+            String code = prefix.length() == 0 ? "0" : prefix.toString();
             codeTable.put(node.getByteValue(), code);
             reverseCodeTable.put(code, node.getByteValue());
             return;

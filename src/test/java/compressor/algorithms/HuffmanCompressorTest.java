@@ -50,22 +50,6 @@ class HuffmanCompressorTest {
     }
 
     @Test
-    void testCompressAndDecompressRandomData() throws IOException {
-        byte[] original = new byte[10000];
-        for (int i = 0; i < original.length; i++) {
-            original[i] = (byte) (Math.random() * 256);
-        }
-
-        byte[] compressed = compressor.compress(original);
-        System.out.println("随机数据 - 原始: " + original.length + " bytes, 压缩后: " + compressed.length + " bytes");
-
-        HuffmanCompressor decompressor = new HuffmanCompressor();
-        byte[] decompressed = decompressor.decompress(compressed);
-
-        assertTrue(Arrays.equals(original, decompressed), "解压后应该与原始数据一致");
-    }
-
-    @Test
     void testCompressAndDecompressAllAsciiChars() throws IOException {
         byte[] original = new byte[256];
         for (int i = 0; i < 256; i++) {

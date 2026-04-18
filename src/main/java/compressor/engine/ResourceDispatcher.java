@@ -4,6 +4,7 @@ import compressor.core.ICompressor;
 import compressor.algorithms.LZ77Compressor;
 import compressor.algorithms.PoolingImageCompressor;
 import compressor.algorithms.LZWImageCompressor;
+import compressor.algorithms.BrotliCompressor;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -16,10 +17,11 @@ import java.util.Map;
 public class ResourceDispatcher {
 
     // 压缩策略ID
-    public static final byte STRATEGY_WEBDICT = 1;    // 网页文本压缩
+    public static final byte STRATEGY_WEBDICT = 1;    // 网页文本压缩 (已废弃，使用BROTLI)
     public static final byte STRATEGY_LZ77 = 2;       // LZ77无损压缩
     public static final byte STRATEGY_LZW_IMAGE = 3;  // 图像LZW压缩
     public static final byte STRATEGY_POOLING_IMAGE = 4; // 图像池化压缩
+    public static final byte STRATEGY_BROTLI = 5;     // Google Brotli压缩
     public static final byte STRATEGY_NONE = 0;       // 不压缩
 
     // 单例模式
@@ -42,16 +44,16 @@ public class ResourceDispatcher {
      * 初始化文件类型映射表
      */
     private void initExtensionMap() {
-        // 文本类 - 使用WebDict压缩
-        extensionToStrategy.put(".html", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".htm", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".css", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".js", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".txt", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".xml", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".json", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".svg", STRATEGY_WEBDICT);
-        extensionToStrategy.put(".md", STRATEGY_WEBDICT);
+        // 文本类 - 使用Brotli压缩（Google优化的网页压缩算法）
+        extensionToStrategy.put(".html", STRATEGY_BROTLI);
+        extensionToStrategy.put(".htm", STRATEGY_BROTLI);
+        extensionToStrategy.put(".css", STRATEGY_BROTLI);
+        extensionToStrategy.put(".js", STRATEGY_BROTLI);
+        extensionToStrategy.put(".txt", STRATEGY_BROTLI);
+        extensionToStrategy.put(".xml", STRATEGY_BROTLI);
+        extensionToStrategy.put(".json", STRATEGY_BROTLI);
+        extensionToStrategy.put(".svg", STRATEGY_BROTLI);
+        extensionToStrategy.put(".md", STRATEGY_BROTLI);
 
         // 图片类 - 使用池化压缩
         extensionToStrategy.put(".jpg", STRATEGY_POOLING_IMAGE);
@@ -100,7 +102,7 @@ public class ResourceDispatcher {
     }
 
     /**
-     * ��据MIME类型获取压缩策略ID
+     * 根据MIME类型获取压缩策略ID
      */
     public byte getStrategyByMimeType(String mimeType) {
         if (mimeType == null) return STRATEGY_NONE;
@@ -108,7 +110,7 @@ public class ResourceDispatcher {
         String lower = mimeType.toLowerCase();
         if (lower.contains("html") || lower.contains("css") || lower.contains("javascript") ||
             lower.contains("text") || lower.contains("xml") || lower.contains("json")) {
-            return STRATEGY_WEBDICT;
+            return STRATEGY_BROTLI;
         }
         if (lower.contains("image")) {
             return STRATEGY_POOLING_IMAGE;
@@ -130,11 +132,8 @@ public class ResourceDispatcher {
 
         switch (strategyId) {
             case STRATEGY_WEBDICT:
-                try {
-                    compressor = new LZ77Compressor(); // 使用LZ77替代WebDict避免内存问题
-                } catch (Exception e) {
-                    return null;
-                }
+                // WebDict 已废弃，使用 Brotli 替代
+                compressor = new BrotliCompressor();
                 break;
             case STRATEGY_LZ77:
                 compressor = new LZ77Compressor();
@@ -148,6 +147,9 @@ public class ResourceDispatcher {
                 } catch (Exception e) {
                     return null; // 图片解析失败，不压缩
                 }
+                break;
+            case STRATEGY_BROTLI:
+                compressor = new BrotliCompressor();
                 break;
             case STRATEGY_NONE:
             default:
@@ -219,10 +221,11 @@ public class ResourceDispatcher {
      */
     public String getStrategyName(byte strategyId) {
         switch (strategyId) {
-            case STRATEGY_WEBDICT: return "WebDict";
+            case STRATEGY_WEBDICT: return "WebDict(已废弃)";
             case STRATEGY_LZ77: return "LZ77";
             case STRATEGY_LZW_IMAGE: return "LZWImage";
             case STRATEGY_POOLING_IMAGE: return "PoolingImage";
+            case STRATEGY_BROTLI: return "Brotli";
             case STRATEGY_NONE: return "None";
             default: return "Unknown";
         }

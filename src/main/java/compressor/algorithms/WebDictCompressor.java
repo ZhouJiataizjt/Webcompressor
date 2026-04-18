@@ -2,42 +2,44 @@ package compressor.algorithms;
 
 import compressor.core.AbstractCompressor;
 import compressor.model.CompressionStats;
-import compressor.utils.BitOutputStream;
-import compressor.utils.BitInputStream;
-import compressor.utils.HashUtils;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.zip.CRC32;
 
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * WebDict 压缩实现 - 使用静态字典 + Trie 匹配
+ * 
+ * 核心架构：
+ * 1. 静态字典（WebDictionary）：预定义高频 Web 字符串，使用 0x80-0xFF 范围索引
+ * 2. Trie 匹配：高效查找最长匹配
+ * 3. 转义机制：处理高字节（0x80-0xFF）避免与 token 冲突
+ */
 public class WebDictCompressor extends AbstractCompressor {
 
     public static final String ALGORITHM_NAME = "WebDict";
-    public static final String DESCRIPTION = "网页专用压缩 - Trie树字典 + LZ77 + Huffman 三级混合压缩";
-    private static final byte[] MAGIC = new byte[]{'W', 'D', 'C', 'T'};
+    public static final String DESCRIPTION = "网页专用压缩 - 静态字典 + Trie匹配";
+    
+    private static final byte[] MAGIC = new byte[]{'W', 'D', 'C', 'T'}; // WebDict Compress Token
+    private static final int VERSION = 1;
 
-    private final TrieDictionary trieDictionary;
-    private final HuffmanCompressor huffmanCompressor;
-    private final LZ77Compressor lz77Compressor;
+    // 转义前缀（用于表示后续字节是原始数据，而非 token）
+    private static final byte ESCAPE_PREFIX = (byte) 0xFF;
+    private static final byte ESCAPE_BYTE = 0x00; // 0xFF 0x00 表示后续的 0x80
 
-    private int trieMatchCount;
-    private int trieBytesSaved;
-    private int lz77MatchCount;
-    private int lz77BytesSaved;
+    // 统计信息
+    private int matchCount;
+    private int bytesSaved;
 
     public WebDictCompressor() {
-        this.trieDictionary = new TrieDictionary();
-        this.huffmanCompressor = new HuffmanCompressor();
-        this.lz77Compressor = new LZ77Compressor();
+        super();
         resetStats();
     }
 
     private void resetStats() {
-        this.trieMatchCount = 0;
-        this.trieBytesSaved = 0;
-        this.lz77MatchCount = 0;
-        this.lz77BytesSaved = 0;
+        this.matchCount = 0;
+        this.bytesSaved = 0;
     }
 
     @Override
@@ -59,133 +61,267 @@ public class WebDictCompressor extends AbstractCompressor {
         startTiming();
         resetStats();
 
-        String text = new String(data, StandardCharsets.UTF_8);
+        System.out.println("\n");
+        System.out.println("╔══════════════════════════════════════════════════════════════════╗");
+        System.out.println("║           WebDictCompressor.compress 开始                    ║");
+        System.out.println("╚══════════════════════════════════════════════════════════════════╝");
+        System.out.println("[原始数据] 长度=" + data.length + " bytes");
 
-        String afterTrie = trieDictionary.applyReplacements(text);
-        trieMatchCount = trieDictionary.getMatchCount();
-        trieBytesSaved = trieDictionary.getReplacementBytesSaved();
+        // 压缩
+        byte[] compressed = compressWithDictionary(data);
 
-        byte[] afterTrieBytes = afterTrie.getBytes(StandardCharsets.UTF_8);
+        // 构建输出
+        byte[] result = buildOutput(compressed);
 
-        byte[] afterLZ77 = lz77Compressor.compress(afterTrieBytes);
-        CompressionStats lz77Stats = lz77Compressor.getStats();
-        lz77MatchCount = (int) (lz77Stats.getOriginalSize() - lz77Stats.getCompressedSize()) / 2;
-        lz77BytesSaved = (int) (lz77Stats.getOriginalSize() - lz77Stats.getCompressedSize());
+        System.out.println("\n[压缩统计]");
+        System.out.println("  - 匹配次数: " + matchCount);
+        System.out.println("  - 节省字节: " + bytesSaved);
+        System.out.println("[最终结果] 原始=" + data.length + " 压缩后=" + result.length + 
+            " 压缩率=" + String.format("%.2f%%", (1 - (double)result.length / data.length) * 100));
+        System.out.println("╔══════════════════════════════════════════════════════════════════╗");
+        System.out.println("║           WebDictCompressor.compress 结束                    ║");
+        System.out.println("╚══════════════════════════════════════════════════════════════════╝\n");
 
-        byte[] finalResult = huffmanCompressor.compress(afterLZ77);
-        CompressionStats huffmanStats = huffmanCompressor.getStats();
-
-        CRC32 crc32 = new CRC32();
-        crc32.update(data);
-
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        out.write(MAGIC[0]);
-        out.write(MAGIC[1]);
-        out.write(MAGIC[2]);
-        out.write(MAGIC[3]);
-        out.write(1);
-
-        byte[] meta = buildMetadata();
-        out.write(meta.length & 0xFF);
-        out.write((meta.length >> 8) & 0xFF);
-        out.write((meta.length >> 16) & 0xFF);
-        out.write((meta.length >> 24) & 0xFF);
-        out.write(meta);
-
-        out.write(finalResult, 0, finalResult.length);
-
-        byte[] result = out.toByteArray();
         endTiming(data.length, result.length);
         return result;
     }
 
-    private byte[] buildMetadata() throws IOException {
-        ByteArrayOutputStream meta = new ByteArrayOutputStream();
-
-        meta.write(0x01);
-
-        byte[] trieBytes = String.valueOf(trieMatchCount).getBytes(StandardCharsets.UTF_8);
-        meta.write(trieBytes.length & 0xFF);
-        meta.write(trieBytes);
-
-        byte[] trieSaved = String.valueOf(trieBytesSaved).getBytes(StandardCharsets.UTF_8);
-        meta.write(trieSaved.length & 0xFF);
-        meta.write(trieSaved);
-
-        return meta.toByteArray();
-    }
-
     @Override
     public byte[] decompress(byte[] data) throws IOException {
-        if (data == null || data.length < 4 + 1 + 4 + 10) {
+        if (data == null || data.length < 5) {
             return new byte[0];
         }
 
         startTiming();
-        ByteArrayInputStream in = new ByteArrayInputStream(data);
 
-        byte[] magic = new byte[4];
-        in.read(magic);
-        if (magic[0] != MAGIC[0] || magic[1] != MAGIC[1] ||
-            magic[2] != MAGIC[2] || magic[3] != MAGIC[3]) {
-            throw new IOException("无效的WebDict压缩文件格式");
+        System.out.println("\n");
+        System.out.println("╔══════════════════════════════════════════════════════════════════╗");
+        System.out.println("║           WebDictCompressor.decompress 开始                   ║");
+        System.out.println("╚══════════════════════════════════════════════════════════════════╝");
+        System.out.println("[压缩数据] 长度=" + data.length + " bytes");
+
+        // 验证魔数
+        if (data[0] != MAGIC[0] || data[1] != MAGIC[1] ||
+            data[2] != MAGIC[2] || data[3] != MAGIC[3]) {
+            throw new IOException("Invalid WebDict compressed file format");
         }
 
-        in.read();
+        // 提取压缩数据
+        byte[] compressedData = new byte[data.length - 5];
+        System.arraycopy(data, 5, compressedData, 0, compressedData.length);
 
-        int metaLen = in.read() | (in.read() << 8) | (in.read() << 16) | (in.read() << 24);
-        byte[] meta = new byte[metaLen];
-        in.read(meta);
+        // 解压
+        byte[] result = decompressWithDictionary(compressedData);
 
-        byte[] compressedData = new byte[data.length - (4 + 1 + 4 + metaLen)];
-        in.read(compressedData);
+        System.out.println("\n[解压结果] 还原后=" + result.length + " bytes");
+        System.out.println("╔══════════════════════════════════════════════════════════════════╗");
+        System.out.println("║           WebDictCompressor.decompress 结束                   ║");
+        System.out.println("╚══════════════════════════════════════════════════════════════════╝\n");
 
-        byte[] afterHuffman = huffmanCompressor.decompress(compressedData);
-
-        byte[] afterLZ77 = lz77Compressor.decompress(afterHuffman);
-
-        String afterTrie = new String(afterLZ77, StandardCharsets.UTF_8);
-        String original = trieDictionary.removeReplacements(afterTrie);
-
-        byte[] result = original.getBytes(StandardCharsets.UTF_8);
         endTiming(result.length, data.length);
         return result;
     }
 
-    public String getTrieTreeVisualization() {
-        return trieDictionary.visualizeTree(4);
+    /**
+     * 使用字典进行压缩
+     * 
+     * 规则：
+     * 1. 只匹配多字符词条（长度 >= 2）
+     * 2. 高字节（0x80-0xFF）需要转义
+     * 3. 只有当词条能节省空间时才使用 token
+     */
+    private byte[] compressWithDictionary(byte[] data) {
+        List<Byte> result = new ArrayList<>();
+        int i = 0;
+
+        System.out.println("\n========== 压缩过程 ==========");
+        System.out.println("[输入] " + data.length + " bytes");
+
+        while (i < data.length) {
+            byte b = data[i];
+            
+            // 高字节（0x80-0xFF）需要转义
+            if (WebDictionary.isToken(b)) {
+                result.add(ESCAPE_PREFIX);
+                result.add(ESCAPE_BYTE);
+                result.add(b);
+                i++;
+            } else {
+                // 尝试在字典中查找匹配
+                MatchResult match = TrieMatcher.longestMatch(data, i);
+                
+                if (match != null && match.matchedText.length() >= 2) {
+                    // 只有当词条长度 >= 2 时才使用 token
+                    // 否则输出原始字符
+                    result.add(match.token);
+                    matchCount++;
+                    bytesSaved += match.matchedText.length() - 1;
+                    
+                    System.out.println(String.format("[MATCH  ] pos=%d '%s' -> token=%s 节省=%d",
+                        i, escapeForDebug(match.matchedText), 
+                        WebDictionary.tokenToString(match.token),
+                        match.matchedText.length() - 1));
+                    
+                    i += match.matchedText.length();
+                } else {
+                    // 单字符或无匹配，输出原始字节
+                    result.add(b);
+                    i++;
+                }
+            }
+        }
+
+        byte[] output = new byte[result.size()];
+        for (int j = 0; j < result.size(); j++) {
+            output[j] = result.get(j);
+        }
+
+        System.out.println("[输出] " + output.length + " bytes");
+        System.out.println("==============================\n");
+
+        return output;
     }
 
-    public int getTrieMatchCount() {
-        return trieMatchCount;
+    /**
+     * 使用字典进行解压
+     */
+    private byte[] decompressWithDictionary(byte[] data) {
+        List<Byte> result = new ArrayList<>();
+        int i = 0;
+
+        System.out.println("\n========== 解压过程 ==========");
+        System.out.println("[输入] " + data.length + " bytes");
+
+        while (i < data.length) {
+            byte b = data[i];
+            
+            // 检查是否是转义序列
+            if ((b & 0xFF) == ESCAPE_PREFIX && i + 1 < data.length && (data[i + 1] & 0xFF) == ESCAPE_BYTE) {
+                // 转义序列：后续字节是原始数据
+                result.add(data[i + 2]);
+                System.out.println(String.format("[ESCAPE ] pos=%d [0xFF,0x00,0x%02X] -> 0x%02X",
+                    i, data[i + 2] & 0xFF, data[i + 2] & 0xFF));
+                i += 3;
+            } else if (WebDictionary.isToken(b)) {
+                // Token
+                String original = WebDictionary.getText(b);
+                
+                if (original != null) {
+                    byte[] originalBytes = original.getBytes(StandardCharsets.UTF_8);
+                    for (byte ob : originalBytes) {
+                        result.add(ob);
+                    }
+                    System.out.println(String.format("[MATCH  ] pos=%d token=%s -> '%s'",
+                        i, WebDictionary.tokenToString(b), escapeForDebug(original)));
+                    i++;
+                } else {
+                    // 未知 token
+                    result.add(b);
+                    i++;
+                }
+            } else {
+                // 普通字节
+                result.add(b);
+                i++;
+            }
+        }
+
+        byte[] output = new byte[result.size()];
+        for (int j = 0; j < result.size(); j++) {
+            output[j] = result.get(j);
+        }
+
+        System.out.println("[输出] " + output.length + " bytes");
+        System.out.println("=============================\n");
+
+        return output;
     }
 
-    public int getTrieBytesSaved() {
-        return trieBytesSaved;
+    private byte[] buildOutput(byte[] compressedData) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        baos.write(MAGIC[0]);
+        baos.write(MAGIC[1]);
+        baos.write(MAGIC[2]);
+        baos.write(MAGIC[3]);
+        baos.write(VERSION);
+        baos.write(compressedData, 0, compressedData.length);
+        return baos.toByteArray();
     }
 
-    public int getLz77MatchCount() {
-        return lz77MatchCount;
+    private static class TrieMatcher {
+        public static MatchResult longestMatch(byte[] data, int startPos) {
+            if (startPos >= data.length) {
+                return null;
+            }
+
+            String longestMatch = null;
+            byte matchToken = 0;
+            int maxLen = 0;
+
+            int maxSearchLen = Math.min(data.length - startPos, 50);
+
+            for (int len = maxSearchLen; len >= 1; len--) {
+                String substr = new String(data, startPos, len, StandardCharsets.UTF_8);
+                
+                if (WebDictionary.contains(substr)) {
+                    longestMatch = substr;
+                    matchToken = WebDictionary.getToken(substr);
+                    maxLen = len;
+                    break;
+                }
+            }
+
+            if (longestMatch != null) {
+                return new MatchResult(longestMatch, matchToken);
+            }
+
+            return null;
+        }
     }
 
-    public int getLz77BytesSaved() {
-        return lz77BytesSaved;
+    private static class MatchResult {
+        public final String matchedText;
+        public final byte token;
+
+        public MatchResult(String matchedText, byte token) {
+            this.matchedText = matchedText;
+            this.token = token;
+        }
     }
 
-    public String getCompressionPipelineInfo() {
+    public int getMatchCount() {
+        return matchCount;
+    }
+
+    public int getBytesSaved() {
+        return bytesSaved;
+    }
+
+    public String getCompressionInfo() {
         return String.format(
-            "压缩流水线统计:\n" +
-            "  1. Trie字典替换: 匹配 %d 次, 节省 %d 字节\n" +
-            "  2. LZ77压缩: 匹配 %d 次, 节省 %d 字节\n" +
-            "  3. Huffman编码: 进一步压缩\n" +
-            "  总计节省: %d 字节",
-            trieMatchCount, trieBytesSaved,
-            lz77MatchCount, lz77BytesSaved,
-            trieBytesSaved + lz77BytesSaved
+            "WebDict 压缩统计:\n" +
+            "  - 匹配次数: %d\n" +
+            "  - 节省字节: %d",
+            matchCount, bytesSaved
         );
     }
 
-    public TrieDictionary getTrieDictionary() {
-        return trieDictionary;
+    private static String escapeForDebug(String s) {
+        if (s == null) return "(null)";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(s.length(), 30); i++) {
+            char c = s.charAt(i);
+            if (c < 32) {
+                sb.append(String.format("\\x%02X", (int) c));
+            } else if (c > 127) {
+                sb.append(String.format("\\u%04X", (int) c));
+            } else {
+                sb.append(c);
+            }
+        }
+        if (s.length() > 30) {
+            sb.append("...");
+        }
+        return sb.toString();
     }
 }
